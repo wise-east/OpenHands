@@ -1,26 +1,25 @@
+import asyncio
+import concurrent.futures
 import os
-import tempfile
 from time import sleep
-from pathlib import Path
 from typing import Callable
 
 import httpx
 import modal
 import tenacity
 
+modal.enable_output()
+
 from openhands.core.config import OpenHandsConfig
 from openhands.events import EventStream
 from openhands.integrations.provider import PROVIDER_TOKEN_TYPE
+from openhands.llm.llm_registry import LLMRegistry
 from openhands.runtime.impl.action_execution.action_execution_client import (
     ActionExecutionClient,
 )
 from openhands.runtime.plugins import PluginRequirement
 from openhands.runtime.runtime_status import RuntimeStatus
 from openhands.runtime.utils.command import get_action_execution_server_startup_command
-from openhands.runtime.utils.runtime_build import (
-    BuildFromImageType,
-    prep_build_folder,
-)
 from openhands.utils.async_utils import call_sync_from_async
 from openhands.utils.tenacity_stop import stop_if_should_exit
 
@@ -49,6 +48,7 @@ class ModalRuntime(ActionExecutionClient):
         self,
         config: OpenHandsConfig,
         event_stream: EventStream,
+        llm_registry: LLMRegistry,
         sid: str = "default",
         plugins: list[PluginRequirement] | None = None,
         env_vars: dict[str, str] | None = None,
@@ -108,6 +108,7 @@ class ModalRuntime(ActionExecutionClient):
         super().__init__(
             config,
             event_stream,
+            llm_registry,
             sid,
             plugins,
             env_vars,
@@ -187,30 +188,36 @@ class ModalRuntime(ActionExecutionClient):
         if runtime_container_image_id:
             base_runtime_image = modal.Image.from_registry(runtime_container_image_id)
         elif base_container_image_id:
-            build_folder = tempfile.mkdtemp()
-            prep_build_folder(
-                build_folder=Path(build_folder),
-                base_image=base_container_image_id,
-                build_from=BuildFromImageType.SCRATCH,
-                extra_deps=runtime_extra_deps,
-                enable_browser=True,
+            base_runtime_image = modal.Image.from_registry(
+                base_container_image_id,
+                add_python="3.12",
             )
-            base_runtime_image = modal.Image.from_dockerfile(
-                path=os.path.join(build_folder, "Dockerfile"),
-                context_dir=build_folder,
+            base_runtime_image = base_runtime_image.apt_install("git", "curl", "tmux", "vim")
+            base_runtime_image = base_runtime_image.run_commands(
+                "apt-get update && apt-get install -y software-properties-common",
+                "add-apt-repository -y ppa:deadsnakes/ppa",
+                "apt-get install -y python3.12 python3.12-venv python3.12-dev",
+                "python3.12 -m ensurepip",
+                "python3.12 -m pip install --upgrade pip setuptools wheel",
             )
+            base_runtime_image = base_runtime_image.run_commands(
+                "python3.12 -m pip install openhands-ai>=0.62.0",
+            )
+            if runtime_extra_deps:
+                extra_deps_list = [dep.strip() for dep in runtime_extra_deps.split(",") if dep.strip()]
+                if extra_deps_list:
+                    base_runtime_image = base_runtime_image.run_commands(
+                        f"python3.12 -m pip install {' '.join(extra_deps_list)}"
+                    )
         else:
             raise ValueError(
                 "Neither runtime container image nor base container image is set"
             )
 
         return base_runtime_image.run_commands(
-            """
-# Disable bracketed paste
-# https://github.com/pexpect/pexpect/issues/669
-echo "set enable-bracketed-paste off" >> /etc/inputrc && \\
-echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
-""".strip()
+            'echo "set enable-bracketed-paste off" >> /etc/inputrc',
+            'echo "export INPUTRC=/etc/inputrc" >> /etc/bash.bashrc',
+            "mkdir -p /openhands/code /workspace",
         )
 
     @tenacity.retry(
@@ -240,6 +247,8 @@ echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
                 server_port=self.container_port,
                 plugins=self.plugins,
                 app_config=self.config,
+                python_prefix=[],
+                python_executable="python3.12",
             )
             self.log("debug", f"Starting container with command: {sandbox_start_cmd}")
             self.sandbox = modal.Sandbox.create(
@@ -250,10 +259,10 @@ echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
                 image=self.image,
                 app=self.app,
                 client=self.modal_client,
-                timeout=60 * 60,
+                timeout=20 * 60,
             )
             MODAL_RUNTIME_IDS[self.sid] = self.sandbox.object_id
-            self.log("debug", f"Container started with modal sandbox ID: {self.sandbox.object_id}")
+            self.log("info", f"Container started with modal sandbox ID: {self.sandbox.object_id}")
 
         except Exception as e:
             self.log(
@@ -268,7 +277,21 @@ echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
         super().close()
 
         if not self.attach_to_existing and self.sandbox:
+            self._terminate_sandbox_with_timeout()
+
+    def _terminate_sandbox_with_timeout(self, timeout_seconds: int = 30):
+        def do_terminate():
             self.sandbox.terminate()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(do_terminate)
+            try:
+                future.result(timeout=timeout_seconds)
+                self.log("info", f"Sandbox {self.sandbox.object_id} terminated successfully")
+            except concurrent.futures.TimeoutError:
+                self.log("warning", f"Sandbox termination timed out after {timeout_seconds}s, sandbox may still be running")
+            except Exception as e:
+                self.log("warning", f"Error terminating sandbox: {e}")
 
     @property
     def vscode_url(self) -> str | None:
