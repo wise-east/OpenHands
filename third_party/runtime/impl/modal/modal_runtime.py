@@ -80,7 +80,7 @@ class ModalRuntime(ActionExecutionClient):
             modal_token_secret,
         )
         self.app = modal.App.lookup(
-            "openhands", create_if_missing=True, client=self.modal_client
+            "openhands-debug", create_if_missing=True, client=self.modal_client
         )
 
         # workspace_base cannot be used because we can't bind mount into a sandbox.
@@ -171,8 +171,10 @@ class ModalRuntime(ActionExecutionClient):
         return self.api_url
 
     @tenacity.retry(
-        stop=tenacity.stop_after_delay(120) | stop_if_should_exit(),
-        retry=tenacity.retry_if_exception_type((ConnectionError, httpx.NetworkError)),
+        stop=tenacity.stop_after_delay(180) | stop_if_should_exit(),
+        retry=tenacity.retry_if_exception_type(
+            (ConnectionError, httpx.NetworkError, httpx.TimeoutException)
+        ),
         reraise=True,
         wait=tenacity.wait_fixed(2),
     )
@@ -201,7 +203,7 @@ class ModalRuntime(ActionExecutionClient):
                 "python3.12 -m pip install --upgrade pip setuptools wheel",
             )
             base_runtime_image = base_runtime_image.run_commands(
-                "python3.12 -m pip install openhands-ai>=0.62.0",
+                "python3.12 -m pip install 'openhands-ai>=0.62.0' 'fastapi==0.128.0' 'pydantic==2.12.5'",
             )
             if runtime_extra_deps:
                 extra_deps_list = [dep.strip() for dep in runtime_extra_deps.split(",") if dep.strip()]
@@ -259,7 +261,9 @@ class ModalRuntime(ActionExecutionClient):
                 image=self.image,
                 app=self.app,
                 client=self.modal_client,
-                timeout=20 * 60,
+                timeout=60 * 60,
+                cpu=8,
+                memory=32768,
             )
             MODAL_RUNTIME_IDS[self.sid] = self.sandbox.object_id
             self.log("info", f"Container started with modal sandbox ID: {self.sandbox.object_id}")
@@ -277,7 +281,25 @@ class ModalRuntime(ActionExecutionClient):
         super().close()
 
         if not self.attach_to_existing and self.sandbox:
+            self._log_sandbox_status()
             self._terminate_sandbox_with_timeout()
+
+    def _log_sandbox_status(self):
+        try:
+            rc = self.sandbox.poll()
+            if rc is not None:
+                self.log("warning", f"Sandbox {self.sandbox.object_id} already exited with code {rc}")
+                stderr_lines = []
+                for line in self.sandbox.stderr:
+                    stderr_lines.append(line)
+                    if len(stderr_lines) >= 50:
+                        break
+                if stderr_lines:
+                    self.log("warning", f"Sandbox stderr (last lines): {''.join(stderr_lines[-20:])}")
+            else:
+                self.log("info", f"Sandbox {self.sandbox.object_id} still running at close time")
+        except Exception as e:
+            self.log("debug", f"Could not query sandbox status: {e}")
 
     def _terminate_sandbox_with_timeout(self, timeout_seconds: int = 30):
         def do_terminate():

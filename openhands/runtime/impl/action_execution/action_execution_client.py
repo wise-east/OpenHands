@@ -14,7 +14,13 @@ from zipfile import ZipFile
 
 import httpcore
 import httpx
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from openhands.core.config import OpenHandsConfig
 from openhands.core.config.mcp_config import (
@@ -59,9 +65,20 @@ from openhands.utils.http_session import HttpSession
 from openhands.utils.tenacity_stop import stop_if_should_exit
 
 
+import logging
+
+_logger = logging.getLogger('openhands')
+
+
 def _is_retryable_error(exception):
     return isinstance(
-        exception, (httpx.RemoteProtocolError, httpcore.RemoteProtocolError)
+        exception, (
+            httpx.RemoteProtocolError,
+            httpcore.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.NetworkError,
+            httpx.TimeoutException,
+        )
     )
 
 
@@ -113,6 +130,7 @@ class ActionExecutionClient(Runtime):
         retry=retry_if_exception(_is_retryable_error),
         stop=stop_after_attempt(5) | stop_if_should_exit(),
         wait=wait_exponential(multiplier=1, min=4, max=15),
+        before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
     def _send_action_server_request(
         self,

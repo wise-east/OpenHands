@@ -13,6 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Node.js 20.x (needed for codex, claude-code, gemini-cli)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @openai/codex @anthropic-ai/claude-code @google/gemini-cli
+
 RUN pip install --no-cache-dir poetry
 
 WORKDIR /work
@@ -26,5 +33,4 @@ RUN poetry config virtualenvs.create false \
 
 RUN pip install --no-cache-dir datasets "swebench @ git+https://github.com/Kipok/SWE-bench.git@22850ac95549"
 
-ENTRYPOINT []
-CMD ["bash"]
+WORKDIR /workspace

@@ -104,10 +104,15 @@ dependencies = [
 ]
 
 optional-dependencies.third_party_runtimes = [
-  "daytona==0.24.2",
+  "daytona>=0.140.0",
   "e2b-code-interpreter>=2",
   "modal>=0.66.26,<1.2",
   "runloop-api-client==0.50",
+]
+optional-dependencies.eval = [
+  "datasets>=4.0",
+  "pandas",
+  "swebench @ git+https://github.com/Kipok/SWE-bench.git@22850ac95549",
 ]
 urls.Homepage = "https://github.com/OpenHands/OpenHands"
 urls.Repository = "https://github.com/OpenHands/OpenHands"
@@ -240,7 +245,7 @@ jupyter_kernel_gateway = "*"
 # Third-party runtime dependencies (optional)
 modal = { version = ">=0.66.26,<1.2.0", optional = true }
 runloop-api-client = { version = "0.50.0", optional = true }
-daytona = { version = "0.24.2", optional = true }
+daytona = { version = ">=0.140.0", optional = true }
 httpx-aiohttp = "^0.1.8"
 e2b-code-interpreter = { version = "^2.0.0", optional = true }
 pybase62 = "^1.0.0"
@@ -256,8 +261,14 @@ asyncpg = "^0.30.0"
 deprecation = "^2.1.0"
 lmnr = "^0.7.20"
 
+# Eval dependencies (optional)
+datasets = { version = ">=4.0", optional = true }
+pandas = { version = "*", optional = true }
+swebench = { git = "https://github.com/Kipok/SWE-bench.git", rev = "22850ac95549", optional = true }
+
 [tool.poetry.extras]
 third_party_runtimes = [ "e2b-code-interpreter", "modal", "runloop-api-client", "daytona" ]
+eval = [ "datasets", "pandas", "swebench" ]
 
 [tool.poetry.group.dev]
 optional = true

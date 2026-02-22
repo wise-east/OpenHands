@@ -22,7 +22,10 @@ from types import MappingProxyType
 from typing import Callable, cast
 from zipfile import ZipFile
 
+import traceback
+
 import httpx
+import tenacity
 
 from openhands.core.config import OpenHandsConfig, SandboxConfig
 from openhands.core.config.mcp_config import MCPConfig, MCPStdioServerConfig
@@ -453,8 +456,20 @@ class Runtime(FileEditRuntimeMixin):
         except (httpx.NetworkError, AgentRuntimeDisconnectedError) as e:
             runtime_status = RuntimeStatus.ERROR_RUNTIME_DISCONNECTED
             error_message = f'{type(e).__name__}: {str(e)}'
-            self.log('error', f'Unexpected error while running action: {error_message}')
+            self.log('error', f'[INFRA] Runtime disconnected while running action: {error_message}')
             self.log('error', f'Problematic action: {str(event)}')
+            self.set_runtime_status(runtime_status, error_message, level='error')
+            return
+        except tenacity.RetryError as e:
+            root_cause = e.last_attempt.exception() if e.last_attempt else None
+            root_msg = f'{type(root_cause).__name__}: {root_cause}' if root_cause else 'unknown'
+            is_network = isinstance(root_cause, (httpx.NetworkError, httpx.RemoteProtocolError, httpx.ConnectError, ConnectionError))
+            label = 'INFRA' if is_network else 'RUNTIME'
+            runtime_status = RuntimeStatus.ERROR_RUNTIME_DISCONNECTED if is_network else RuntimeStatus.ERROR
+            error_message = f'RetryError after exhausting retries (root cause: {root_msg})'
+            self.log('error', f'[{label}] {error_message}')
+            self.log('error', f'Problematic action: {str(event)}')
+            self.log('debug', f'Full traceback:\n{traceback.format_exc()}')
             self.set_runtime_status(runtime_status, error_message, level='error')
             return
         except Exception as e:
@@ -462,6 +477,7 @@ class Runtime(FileEditRuntimeMixin):
             error_message = f'{type(e).__name__}: {str(e)}'
             self.log('error', f'Unexpected error while running action: {error_message}')
             self.log('error', f'Problematic action: {str(event)}')
+            self.log('debug', f'Full traceback:\n{traceback.format_exc()}')
             self.set_runtime_status(runtime_status, error_message, level='error')
             return
 

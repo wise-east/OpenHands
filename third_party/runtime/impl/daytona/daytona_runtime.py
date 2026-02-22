@@ -4,6 +4,7 @@ from typing import Callable
 import httpx
 import tenacity
 from daytona import (
+    CreateSandboxFromImageParams,
     CreateSandboxFromSnapshotParams,
     Daytona,
     DaytonaConfig,
@@ -37,6 +38,7 @@ class DaytonaRuntime(ActionExecutionClient):
         self,
         config: OpenHandsConfig,
         event_stream: EventStream,
+        llm_registry=None,
         sid: str = "default",
         plugins: list[PluginRequirement] | None = None,
         env_vars: dict[str, str] | None = None,
@@ -62,7 +64,7 @@ class DaytonaRuntime(ActionExecutionClient):
 
         daytona_config = DaytonaConfig(
             api_key=daytona_api_key,
-            server_url=daytona_api_url,
+            api_url=daytona_api_url,
             target=daytona_target,
         )
         self.daytona = Daytona(daytona_config)
@@ -77,6 +79,7 @@ class DaytonaRuntime(ActionExecutionClient):
         super().__init__(
             config,
             event_stream,
+            llm_registry,
             sid,
             plugins,
             env_vars,
@@ -119,21 +122,33 @@ class DaytonaRuntime(ActionExecutionClient):
         return env_vars
 
     def _create_sandbox(self) -> Sandbox:
-        # Check if auto-stop should be disabled - otherwise have it trigger after 60 minutes
         disable_auto_stop = (
             os.getenv("DAYTONA_DISABLE_AUTO_STOP", "false").lower() == "true"
         )
         auto_stop_interval = 0 if disable_auto_stop else 60
 
-        sandbox_params = CreateSandboxFromSnapshotParams(
+        common = dict(
             language="python",
-            snapshot=self.config.sandbox.runtime_container_image,
             public=True,
             env_vars=self._get_creation_env_vars(),
             labels={OPENHANDS_SID_LABEL: self.sid},
             auto_stop_interval=auto_stop_interval,
         )
-        return self.daytona.create(sandbox_params)
+
+        snapshot = self.config.sandbox.runtime_container_image
+        image = self.config.sandbox.base_container_image
+
+        if snapshot:
+            params = CreateSandboxFromSnapshotParams(snapshot=snapshot, **common)
+            return self.daytona.create(params)
+
+        params = CreateSandboxFromImageParams(image=image, **common)
+        self.log("info", f"Creating Daytona sandbox from image: {image}")
+        return self.daytona.create(
+            params,
+            timeout=0,
+            on_snapshot_create_logs=lambda chunk: self.log("debug", chunk.rstrip()),
+        )
 
     def _construct_api_url(self, port: int) -> str:
         assert self.sandbox is not None, "Sandbox is not initialized"
@@ -142,6 +157,52 @@ class DaytonaRuntime(ActionExecutionClient):
     @property
     def action_execution_server_url(self) -> str:
         return self.api_url
+
+    def _run_sandbox_command(self, command: str, timeout: int = 300) -> str:
+        """Run a synchronous command inside the sandbox and return its output."""
+        assert self.sandbox is not None
+        response = self.sandbox.process.exec(command, timeout=timeout)
+        exit_code = getattr(response, 'exit_code', None)
+        result = response.result if hasattr(response, 'result') else str(response)
+        if exit_code and exit_code != 0:
+            raise RuntimeError(f"Command failed (exit {exit_code}): {command}\n{result}")
+        return result
+
+    def _needs_bootstrap(self) -> bool:
+        """Check if the sandbox has a working OpenHands runtime (python3.12 + openhands package)."""
+        try:
+            result = self._run_sandbox_command(
+                "python3.12 -c 'import openhands' 2>&1 && echo 'ready'", timeout=15
+            )
+            return "ready" not in result
+        except Exception:
+            return True
+
+    def _bootstrap_runtime(self) -> None:
+        """Install the OpenHands action execution server into a raw base image sandbox.
+
+        Mirrors what Modal does in _get_image_definition: installs Python 3.12,
+        system deps, the openhands-ai package, and creates required directories.
+        """
+        self.log("info", "Bootstrapping OpenHands runtime in sandbox...")
+
+        commands = [
+            "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git curl tmux vim software-properties-common",
+            "add-apt-repository -y ppa:deadsnakes/ppa",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y python3.12 python3.12-venv python3.12-dev",
+            "python3.12 -m ensurepip",
+            "python3.12 -m pip install --upgrade pip setuptools wheel",
+            "python3.12 -m pip install openhands-ai>=0.62.0",
+            "mkdir -p /openhands/code /workspace",
+            'echo "set enable-bracketed-paste off" >> /etc/inputrc',
+            'echo "export INPUTRC=/etc/inputrc" >> /etc/bash.bashrc',
+        ]
+
+        for cmd in commands:
+            self.log("info", f"Bootstrap: {cmd[:80]}...")
+            self._run_sandbox_command(cmd, timeout=600)
+
+        self.log("info", "Bootstrap complete.")
 
     def _start_action_execution_server(self) -> None:
         assert self.sandbox is not None, "Sandbox is not initialized"
@@ -168,15 +229,22 @@ class DaytonaRuntime(ActionExecutionClient):
 
         exec_command = self.sandbox.process.execute_session_command(
             exec_session_id,
-            SessionExecuteRequest(command=start_command_str, var_async=True),
+            SessionExecuteRequest(command=start_command_str, run_async=True),
         )
 
         self.log("debug", f"exec_command_id: {exec_command.cmd_id}")
 
     @tenacity.retry(
-        stop=tenacity.stop_after_delay(120) | stop_if_should_exit(),
-        wait=tenacity.wait_fixed(1),
-        reraise=(ConnectionRefusedError,),
+        stop=tenacity.stop_after_delay(180) | stop_if_should_exit(),
+        retry=tenacity.retry_if_exception_type((
+            ConnectionError,
+            ConnectionRefusedError,
+            httpx.NetworkError,
+            httpx.TimeoutException,
+            httpx.HTTPStatusError,
+            RequestHTTPError,
+        )),
+        wait=tenacity.wait_fixed(2),
     )
     def _wait_until_alive(self):
         super().check_if_alive()
@@ -210,6 +278,8 @@ class DaytonaRuntime(ActionExecutionClient):
             should_start_action_execution_server = True
 
         if should_start_action_execution_server:
+            if await call_sync_from_async(self._needs_bootstrap):
+                await call_sync_from_async(self._bootstrap_runtime)
             await call_sync_from_async(self._start_action_execution_server)
             self.log(
                 "info",
@@ -254,16 +324,13 @@ class DaytonaRuntime(ActionExecutionClient):
             return
 
         if self.sandbox:
-            delete_on_close = (
-                os.getenv("DAYTONA_DELETE_ON_CLOSE", "false").lower() == "true"
-            )
-
-            if delete_on_close:
+            try:
                 self.sandbox.delete()
-            else:
-                # Only stop if sandbox is currently started
-                if self._get_sandbox().state == "started":
+            except Exception:
+                try:
                     self.sandbox.stop()
+                except Exception:
+                    pass
 
     @property
     def vscode_url(self) -> str | None:
