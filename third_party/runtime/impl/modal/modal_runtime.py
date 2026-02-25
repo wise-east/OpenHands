@@ -190,16 +190,11 @@ class ModalRuntime(ActionExecutionClient):
         if runtime_container_image_id:
             base_runtime_image = modal.Image.from_registry(runtime_container_image_id)
         elif base_container_image_id:
-            base_runtime_image = modal.Image.from_registry(
-                base_container_image_id,
-                add_python="3.12",
-            )
+            base_runtime_image = modal.Image.from_registry(base_container_image_id)
             base_runtime_image = base_runtime_image.apt_install("git", "curl", "tmux", "vim")
             base_runtime_image = base_runtime_image.run_commands(
-                "apt-get update && apt-get install -y software-properties-common",
-                "add-apt-repository -y ppa:deadsnakes/ppa",
-                "apt-get install -y python3.12 python3.12-venv python3.12-dev",
-                "python3.12 -m ensurepip",
+                "curl -fsSL https://github.com/astral-sh/python-build-standalone/releases/download/20250106/cpython-3.12.8+20250106-x86_64-unknown-linux-gnu-install_only.tar.gz | tar -xz -C /opt/",
+                "ln -sf /opt/python/bin/python3.12 /usr/local/bin/python3.12",
                 "python3.12 -m pip install --upgrade pip setuptools wheel",
             )
             base_runtime_image = base_runtime_image.run_commands(
@@ -216,6 +211,7 @@ class ModalRuntime(ActionExecutionClient):
                 "Neither runtime container image nor base container image is set"
             )
 
+        base_runtime_image = base_runtime_image.entrypoint([])
         return base_runtime_image.run_commands(
             'echo "set enable-bracketed-paste off" >> /etc/inputrc',
             'echo "export INPUTRC=/etc/inputrc" >> /etc/bash.bashrc',

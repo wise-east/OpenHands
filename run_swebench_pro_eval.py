@@ -33,7 +33,7 @@ if REPO_DIR != SCRIPT_DIR:
 else:
     print(f"Agent code: {REPO_DIR}")
 
-# Ensure ~/.modal.toml exists for swebench harness evaluation (Phase 2).
+# Ensure ~/.modal.toml exists for SWE-bench Pro evaluation (Phase 2).
 _modal_toml = Path.home() / ".modal.toml"
 if not _modal_toml.exists():
     _token_id = os.environ.get("MODAL_TOKEN_ID", "")
@@ -91,7 +91,7 @@ logging.getLogger("asyncio").setLevel(logging.ERROR)
 
 _oh_logger.setLevel(logging.ERROR)
 
-logger = logging.getLogger("swebench_eval")
+logger = logging.getLogger("swebench_pro_eval")
 logger.setLevel(logging.INFO)
 logger.propagate = False
 if not logger.handlers:
@@ -104,9 +104,10 @@ AGENT_CLS_TO_FAKE_USER_RESPONSE_FN = {
 }
 
 MODEL = "openai/gpt-5-mini"
-MODEL_NAME = "swebench_eval"
+MODEL_NAME = "swebench_pro_eval"
 
-INSTANCE_SWE_ENTRY_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "swe_bench", "instance_swe_entry.sh")
+SWEBENCH_PRO_DATASET = "ScaleAI/SWE-bench_Pro"
+SWEBENCH_PRO_REPO_DIR = os.path.join(SCRIPT_DIR, "third_party", "swebench_pro")
 
 
 def remove_binary_diffs(patch_text: str) -> str:
@@ -146,399 +147,83 @@ def remove_binary_files_from_git() -> str:
     """.strip()
 
 
-# Priority instances ordered by: difficulty (never-resolved first), eval
-# reliability (zero eval-infrastructure errors first), then generation speed.
-#
-# Tiers (budget = max generation duration across runs):
-#   T1  Never resolved  · zero eval errors · max gen < 30 min
-#   T2  Sometimes resolved · zero eval errors · max gen < 30 min
-#   T3  Never resolved  · had eval errors  · max gen < 30 min
-#   T4  Sometimes resolved · had eval errors · max gen < 30 min
-#   T5  Always-resolved / slow  (back-fill)
-#
-# Generated via:
-#   python scripts/prioritize.py --budget 1800 \
-#       trajectories/20260220_073844 trajectories/20260220_083316 \
-#       trajectories/20260220_085045 trajectories/20260219_184927
-PRIORITY_INSTANCES = [
-    "django__django-11728",
-    "django__django-15554",
-    "sphinx-doc__sphinx-8551",
-    "matplotlib__matplotlib-24149",
-    "sphinx-doc__sphinx-7757",
-    "django__django-15503",
-    "pydata__xarray-3993",
-    "matplotlib__matplotlib-22871",
-    "sympy__sympy-13877",
-    "sphinx-doc__sphinx-7454",
-    "matplotlib__matplotlib-24627",
-    "django__django-14351",
-    "django__django-13344",
-    "django__django-16642",
-    "sympy__sympy-22914",
-    "sympy__sympy-23262",
-    "sympy__sympy-17139",
-    "django__django-11099",
-    "django__django-11206",
-    "django__django-14771",
-    "django__django-13297",
-    "sympy__sympy-17655",
-    "django__django-11555",
-    "sympy__sympy-21379",
-    "django__django-13315",
-    "django__django-11815",
-    "sympy__sympy-20801",
-    "django__django-11276",
-    "django__django-15278",
-    "django__django-12125",
-    "django__django-12663",
-    "django__django-15103",
-    "sphinx-doc__sphinx-8475",
-    "scikit-learn__scikit-learn-26323",
-    "matplotlib__matplotlib-26113",
-    "sphinx-doc__sphinx-7910",
-    "django__django-15916",
-    "django__django-14534",
-    "matplotlib__matplotlib-25287",
-    "scikit-learn__scikit-learn-25931",
-    "django__django-16938",
-    "django__django-13410",
-    "scikit-learn__scikit-learn-25973",
-    "scikit-learn__scikit-learn-25232",
-    "matplotlib__matplotlib-24026",
-    "pylint-dev__pylint-8898",
-    "matplotlib__matplotlib-24177",
-    "django__django-17084",
-    "matplotlib__matplotlib-24970",
-    "django__django-15957",
-    "sphinx-doc__sphinx-8035",
-    "psf__requests-6028",
-    "django__django-15695",
-    "sphinx-doc__sphinx-9461",
-    "scikit-learn__scikit-learn-13135",
-    "django__django-13670",
-    "django__django-16569",
-    "django__django-15127",
-    "django__django-13741",
-    "sphinx-doc__sphinx-9367",
-    "django__django-15467",
-    "django__django-16595",
-    "django__django-16493",
-    "scikit-learn__scikit-learn-14710",
-    "django__django-14765",
-    "django__django-15569",
-    "django__django-16333",
-    "django__django-7530",
-    "django__django-15022",
-    "django__django-15368",
-    "pytest-dev__pytest-5809",
-    "django__django-14373",
-    "django__django-16801",
-    "scikit-learn__scikit-learn-14894",
-    "pytest-dev__pytest-5262",
-    "django__django-16454",
-    "matplotlib__matplotlib-22719",
-    "django__django-15731",
-    "django__django-15863",
-    "django__django-14787",
-    "django__django-10097",
-    "scikit-learn__scikit-learn-15100",
-    "django__django-13658",
-    "sympy__sympy-13757",
-    "sympy__sympy-14976",
-    "matplotlib__matplotlib-23412",
-    "django__django-14349",
-    "django__django-12050",
-    "scikit-learn__scikit-learn-14496",
-    "psf__requests-1766",
-    "django__django-16100",
-    "scikit-learn__scikit-learn-9288",
-    "django__django-15987",
-    "django__django-16082",
-    "sympy__sympy-12096",
-    "scikit-learn__scikit-learn-14053",
-    "scikit-learn__scikit-learn-14141",
-    "matplotlib__matplotlib-25122",
-    "django__django-16877",
-    "matplotlib__matplotlib-20859",
-    "scikit-learn__scikit-learn-13779",
-    "django__django-13028",
-    "django__django-9296",
-    "django__django-11532",
-    "pydata__xarray-4075",
-    "django__django-16145",
-    "django__django-15741",
-    "django__django-16819",
-    "sympy__sympy-12481",
-    "django__django-14631",
-    "pydata__xarray-3095",
-    "pydata__xarray-6461",
-    "sphinx-doc__sphinx-10466",
-    "sympy__sympy-23950",
-    "sphinx-doc__sphinx-9673",
-    "django__django-16527",
-    "django__django-13964",
-    "django__django-15814",
-    "pydata__xarray-4356",
-    "django__django-16612",
-    "sympy__sympy-13480",
-    "django__django-16139",
-    "django__django-13821",
-    "psf__requests-5414",
-    "django__django-15268",
-    "pytest-dev__pytest-7432",
-    "django__django-14999",
-    "pytest-dev__pytest-5787",
-    "django__django-15128",
-    "django__django-15930",
-    "django__django-14500",
-    "scikit-learn__scikit-learn-13328",
-    "matplotlib__matplotlib-25332",
-    "django__django-16315",
-    "sphinx-doc__sphinx-9320",
-    "django__django-12143",
-    "pytest-dev__pytest-7490",
-    "pydata__xarray-2905",
-    "pydata__xarray-4094",
-    "scikit-learn__scikit-learn-14983",
-    "django__django-14311",
-    "django__django-15382",
-    "scikit-learn__scikit-learn-13124",
-    "django__django-16901",
-    "pydata__xarray-3305",
-    "django__django-14007",
-    "sympy__sympy-12419",
-    "django__django-16032",
-    "sphinx-doc__sphinx-9698",
-    "scikit-learn__scikit-learn-12682",
-    "matplotlib__matplotlib-20488",
-    "psf__requests-1921",
-    "django__django-14752",
-    "sympy__sympy-19954",
-    "django__django-12155",
-    "django__django-16255",
-    "django__django-11551",
-    "sympy__sympy-19637",
-    "django__django-16485",
-    "sympy__sympy-15809",
-    "astropy__astropy-14508",
-    "sympy__sympy-18189",
-    "astropy__astropy-14309",
-    "django__django-11095",
-    "django__django-13089",
-    "sympy__sympy-23534",
-    "django__django-13810",
-    "django__django-12774",
-    "django__django-11999",
-    "django__django-11848",
-    "django__django-12713",
-    "django__django-13820",
-    "django__django-11603",
-    "django__django-13590",
-    "astropy__astropy-14995",
-    "django__django-10914",
-    "django__django-12419",
-    "django__django-16662",
-    "astropy__astropy-7671",
-    "astropy__astropy-13453",
-    "astropy__astropy-7166",
-    "scikit-learn__scikit-learn-13496",
-    "django__django-13279",
-    "django__django-12276",
-    "pytest-dev__pytest-5631",
-    "django__django-11880",
-    "django__django-13417",
-    "django__django-13568",
-    "django__django-16116",
-    "django__django-11211",
-    "pydata__xarray-6744",
-    "django__django-12039",
-    "sympy__sympy-24443",
-    "django__django-13158",
-    "django__django-11333",
-    "django__django-13012",
-    "django__django-13551",
-    "django__django-13837",
-    "pydata__xarray-3151",
-    "django__django-15561",
-    "sympy__sympy-16766",
-    "sympy__sympy-20590",
-    "django__django-13033",
-    "django__django-12858",
-    "django__django-11299",
-    "django__django-14434",
-    "django__django-14608",
-    "django__django-13343",
-    "django__django-13933",
-    "sphinx-doc__sphinx-9230",
-    "django__django-13128",
-    "django__django-11740",
-    "django__django-16429",
-    "django__django-13449",
-    "django__django-12754",
-    "django__django-11292",
-    "django__django-11749",
-    "sympy__sympy-13615",
-    "django__django-12708",
-    "sympy__sympy-22714",
-    "sympy__sympy-18211",
-    "pydata__xarray-3677",
-    "django__django-12741",
-    "django__django-16661",
-    "sphinx-doc__sphinx-9281",
-    "matplotlib__matplotlib-14623",
-    "django__django-14122",
-    "django__django-13121",
-    "sympy__sympy-15345",
-    "sympy__sympy-24066",
-    "pytest-dev__pytest-7324",
-    "django__django-12209",
-    "astropy__astropy-13579",
-    "django__django-13346",
-    "psf__requests-2931",
-    "sympy__sympy-14248",
-    "sphinx-doc__sphinx-8265",
-    "pylint-dev__pylint-6903",
-    "sympy__sympy-19783",
-    "pydata__xarray-7233",
-    "matplotlib__matplotlib-20826",
-    "astropy__astropy-14096",
-    "sphinx-doc__sphinx-8721",
-    "django__django-14017",
-    "pydata__xarray-4687",
-    "psf__requests-1724",
-    "matplotlib__matplotlib-26291",
-    "sympy__sympy-16792",
-    "sphinx-doc__sphinx-10673",
-    "scikit-learn__scikit-learn-14629",
-    "sympy__sympy-21612",
-    "pytest-dev__pytest-7571",
-    "sympy__sympy-14531",
-    "matplotlib__matplotlib-22865",
-    "scikit-learn__scikit-learn-12973",
-    "matplotlib__matplotlib-25311",
-    "sympy__sympy-15017",
-    "sphinx-doc__sphinx-9658",
-    "pydata__xarray-6938",
-    "pylint-dev__pylint-6386",
-    "pydata__xarray-7393",
-    "django__django-15161",
-    "django__django-15280",
-    "sympy__sympy-12489",
-    "django__django-15037",
-    "sphinx-doc__sphinx-10449",
-    "django__django-11138",
-    "pylint-dev__pylint-4970",
-    "django__django-16560",
-    "scikit-learn__scikit-learn-10297",
-    "django__django-14376",
-    "sphinx-doc__sphinx-8548",
-    "django__django-14725",
-    "pylint-dev__pylint-6528",
-    "mwaskom__seaborn-3069",
-    "sphinx-doc__sphinx-8593",
-    "pydata__xarray-6721",
-    "sympy__sympy-19495",
-    "django__django-13401",
-    "pytest-dev__pytest-8399",
-    "scikit-learn__scikit-learn-11578",
-    "django__django-14140",
-    "sympy__sympy-13091",
-    "sphinx-doc__sphinx-11445",
-    "scikit-learn__scikit-learn-14087",
-    "sympy__sympy-11618",
-    "pytest-dev__pytest-6197",
-    "pytest-dev__pytest-7236",
-    "django__django-12965",
-    "scikit-learn__scikit-learn-10844",
-    "pytest-dev__pytest-10051",
-    "psf__requests-2317",
-    "matplotlib__matplotlib-26342",
-    "scikit-learn__scikit-learn-25102",
-    "django__django-13809",
-    "django__django-11149",
-    "sphinx-doc__sphinx-8621",
-    "sympy__sympy-19040",
-    "sympy__sympy-24661",
-    "django__django-14580",
-    "django__django-10973",
-    "pytest-dev__pytest-10081",
-    "scikit-learn__scikit-learn-10908",
-    "django__django-13807",
-    "django__django-13112",
-    "sympy__sympy-19346",
-    "sympy__sympy-18698",
-    "sympy__sympy-13878",
-    "sympy__sympy-13551",
-    "sphinx-doc__sphinx-8120",
-    "scikit-learn__scikit-learn-11310",
-    "pytest-dev__pytest-6202",
-    "sympy__sympy-23824",
-    "sphinx-doc__sphinx-8056",
-    "pylint-dev__pylint-7277",
-    "matplotlib__matplotlib-25960",
-    "sympy__sympy-23413",
-    "sympy__sympy-24562",
-    "sympy__sympy-24539",
-]
-
-
-def get_swebench_instances(num_instances: int) -> list[pd.Series]:
-    """Select instances prioritizing unresolved+fast, then filling with remaining."""
-    logger.info(f"Loading {num_instances} instances from SWE-bench_Verified dataset...")
-    dataset = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
-
+def _load_pro_dataset() -> dict[str, pd.Series]:
+    dataset = load_dataset(SWEBENCH_PRO_DATASET, split="test")
     by_id: dict[str, pd.Series] = {}
     for item in dataset:
         by_id[item["instance_id"]] = pd.Series(item)
+    return by_id
+
+
+def get_swebench_instances(num_instances: int, seed: int = 42) -> list[pd.Series]:
+    """Select instances via deterministic stratified sampling across languages.
+
+    Slots are filled by round-robin across languages (shuffled within each
+    language group with a fixed seed) so that every language gets roughly
+    equal representation.
+    """
+    import random
+
+    logger.info(f"Loading {num_instances} instances from SWE-bench Pro dataset...")
+    by_id = _load_pro_dataset()
+
+    by_lang: dict[str, list[pd.Series]] = {}
+    for inst in by_id.values():
+        lang = getattr(inst, "repo_language", "unknown")
+        by_lang.setdefault(lang, []).append(inst)
+
+    rng = random.Random(seed)
+    for lang_instances in by_lang.values():
+        rng.shuffle(lang_instances)
 
     instances: list[pd.Series] = []
-    seen: set[str] = set()
-
-    # Phase 1: take from priority list in order
-    for iid in PRIORITY_INSTANCES:
-        if len(instances) >= num_instances:
-            break
-        if iid in by_id:
-            instances.append(by_id[iid])
-            seen.add(iid)
-
-    # Phase 2: fill remaining slots with all other instances
-    if len(instances) < num_instances:
-        remaining = [by_id[iid] for iid in by_id if iid not in seen]
-        instances.extend(remaining[:num_instances - len(instances)])
+    lang_keys = sorted(by_lang.keys())
+    lang_iters = {lang: iter(by_lang[lang]) for lang in lang_keys}
+    while len(instances) < num_instances and lang_iters:
+        exhausted = []
+        for lang in lang_keys:
+            if lang not in lang_iters:
+                continue
+            if len(instances) >= num_instances:
+                break
+            try:
+                instances.append(next(lang_iters[lang]))
+            except StopIteration:
+                exhausted.append(lang)
+        for lang in exhausted:
+            del lang_iters[lang]
 
     repos: dict[str, int] = {}
-    difficulties: dict[str, int] = {}
+    languages: dict[str, int] = {}
     for inst in instances:
         repos[inst.repo] = repos.get(inst.repo, 0) + 1
-        difficulties[inst.difficulty] = difficulties.get(inst.difficulty, 0) + 1
+        lang = getattr(inst, "repo_language", "unknown")
+        languages[lang] = languages.get(lang, 0) + 1
 
-    priority_count = sum(1 for inst in instances if inst.instance_id in seen)
-    logger.info(f"Loaded {len(instances)} instances ({priority_count} from priority list) across {len(repos)} repos:")
+    logger.info(f"Loaded {len(instances)} instances across {len(repos)} repos:")
     for repo, count in sorted(repos.items(), key=lambda x: -x[1]):
         logger.info(f"  {repo}: {count}")
-    logger.info(f"Difficulty distribution:")
-    for diff, count in sorted(difficulties.items(), key=lambda x: -x[1]):
-        logger.info(f"  {diff}: {count}")
+    logger.info(f"Language distribution:")
+    for lang, count in sorted(languages.items(), key=lambda x: -x[1]):
+        logger.info(f"  {lang}: {count}")
     return instances
 
 
-def get_swebench_workspace_dir_name(instance: pd.Series) -> str:
-    return f'{instance.repo}__{instance.version}'.replace('/', '__')
+def get_workspace_path(instance: pd.Series) -> str:
+    return "/app"
 
 
 def get_container_image(instance: pd.Series) -> str:
-    instance_id = instance.instance_id
-    repo, name = instance_id.split("__")
-    return f"docker.io/swebench/sweb.eval.x86_64.{repo}_1776_{name}:latest".lower()
+    tag = instance.dockerhub_tag
+    return f"docker.io/jefzda/sweap-images:{tag}"
 
 
 def initialize_runtime(runtime: Runtime, instance: pd.Series, instance_id: str):
-    workspace_dir_name = get_swebench_workspace_dir_name(instance)
+    workspace_path = get_workspace_path(instance)
+    base_commit = instance["base_commit"]
 
     action = CmdRunAction(
-        command=f"""echo 'export SWE_INSTANCE_ID={instance["instance_id"]}' >> ~/.bashrc && echo 'export PIP_CACHE_DIR=~/.cache/pip' >> ~/.bashrc && echo "alias git='git --no-pager'" >> ~/.bashrc && git config --global core.pager "" && git config --global diff.binary false"""
+        command=f"""echo 'export SWE_INSTANCE_ID={instance["instance_id"]}' >> ~/.bashrc && echo "alias git='git --no-pager'" >> ~/.bashrc && git config --global core.pager "" && git config --global diff.binary false"""
     )
     action.set_hard_timeout(600)
     runtime.run_action(action)
@@ -547,27 +232,7 @@ def initialize_runtime(runtime: Runtime, instance: pd.Series, instance_id: str):
     action.set_hard_timeout(600)
     runtime.run_action(action)
 
-    action = CmdRunAction(command="mkdir -p /swe_util/eval_data/instances")
-    action.set_hard_timeout(600)
-    runtime.run_action(action)
-
-    swe_instance_json_name = "swe-bench-instance.json"
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_file_path = os.path.join(temp_dir, swe_instance_json_name)
-        with open(temp_file_path, "w") as f:
-            json.dump([instance.to_dict()], f)
-        runtime.copy_to(temp_file_path, "/swe_util/eval_data/instances/")
-        runtime.copy_to(INSTANCE_SWE_ENTRY_SCRIPT, "/swe_util/")
-
-    action = CmdRunAction(command="source ~/.bashrc")
-    action.set_hard_timeout(600)
-    runtime.run_action(action)
-
-    action = CmdRunAction(command="source /swe_util/instance_swe_entry.sh")
-    action.set_hard_timeout(600)
-    runtime.run_action(action)
-
-    action = CmdRunAction(command=f"cd /workspace/{workspace_dir_name}")
+    action = CmdRunAction(command=f"cd {workspace_path} && git reset --hard {base_commit} && git checkout {base_commit}")
     action.set_hard_timeout(600)
     runtime.run_action(action)
 
@@ -605,9 +270,9 @@ def _save_partial_trajectory(event_stream: EventStream, output_dir: str, attempt
 
 
 def complete_runtime(runtime: Runtime, instance: pd.Series) -> dict:
-    workspace_dir_name = get_swebench_workspace_dir_name(instance)
+    workspace_path = get_workspace_path(instance)
 
-    action = CmdRunAction(command=f"cd /workspace/{workspace_dir_name}")
+    action = CmdRunAction(command=f"cd {workspace_path}")
     action.set_hard_timeout(600)
     _run_action_with_retry(runtime, action)
 
@@ -668,10 +333,10 @@ def complete_runtime(runtime: Runtime, instance: pd.Series) -> dict:
 
 
 def get_instruction(instance: pd.Series) -> str:
-    workspace_dir_name = get_swebench_workspace_dir_name(instance)
-    repo_path = f"/workspace/{workspace_dir_name}"
+    repo_path = get_workspace_path(instance)
+    lang = getattr(instance, "repo_language", "unknown")
 
-    instruction = f"""I have access to a python code repository in the directory {repo_path}. You can explore and modify files using the available tools. Consider the following issue description:
+    instruction = f"""I have access to a code repository in the directory {repo_path}. The primary language is {lang}. You can explore and modify files using the available tools. Consider the following issue description:
 
 <issue>
 {instance["problem_statement"]}
@@ -679,59 +344,52 @@ def get_instruction(instance: pd.Series) -> str:
 
 Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue> are met?
 I've already taken care of all changes to any of the test files described in the <issue>. This means you DON'T have to modify the testing logic or any of the tests in any way!
-Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+The development environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
 Your task is to make the minimal changes to non-test files in the {repo_path} directory to ensure the <issue> is satisfied.
 
 Follow these phases to resolve the issue:
 
 Phase 1. READING: read the problem and reword it in clearer terms
-   1.1 If there are code or config snippets. Express in words any best practices or conventions in them.
+   1.1 If there are code or config snippets, express in words any best practices or conventions in them.
    1.2 Highlight message errors, method names, variables, file names, stack traces, and technical details.
    1.3 Explain the problem in clear terms.
    1.4 Enumerate the steps to reproduce the problem.
-   1.5 Highlight any best practices to take into account when testing and fixing the issue
+   1.5 Highlight any best practices to take into account when testing and fixing the issue.
 
-Phase 2. RUNNING: install and run the tests on the repository
-   2.1 Activate the environment by running
-   . /opt/miniconda3/etc/profile.d/conda.sh ; conda activate testbed
-   2.2 Follow the readme
-   2.3 Install the environment and anything needed
-   2.4 Iterate and figure out how to run the tests
+Phase 2. EXPLORATION: find the files that are related to the problem and possible solutions
+   2.1 Use `grep` or `find` to search for relevant methods, classes, keywords and error messages.
+   2.2 Identify all files related to the problem statement.
+   2.3 Propose the methods and files to fix the issue and explain why.
+   2.4 From the possible file locations, select the most likely location to fix the issue.
 
-Phase 3. EXPLORATION: find the files that are related to the problem and possible solutions
-   3.1 Use `grep` to search for relevant methods, classes, keywords and error messages.
-   3.2 Identify all files related to the problem statement.
-   3.3 Propose the methods and files to fix the issue and explain why.
-   3.4 From the possible file locations, select the most likely location to fix the issue.
+Phase 3. TEST CREATION: before implementing any fix, create a script to reproduce and verify the issue.
+   3.1 Look at existing test files in the repository to understand the test format/structure.
+   3.2 Create a minimal reproduction script that reproduces the located issue.
+   3.3 Run the reproduction script to confirm you are reproducing the issue.
+   3.4 Adjust the reproduction script as necessary.
 
-Phase 4. TEST CREATION: before implementing any fix, create a script to reproduce and verify the issue.
-   4.1 Look at existing test files in the repository to understand the test format/structure.
-   4.2 Create a minimal reproduction script that reproduces the located issue.
-   4.3 Run the reproduction script to confirm you are reproducing the issue.
-   4.4 Adjust the reproduction script as necessary.
+Phase 4. FIX ANALYSIS: state clearly the problem and how to fix it
+   4.1 State clearly what the problem is.
+   4.2 State clearly where the problem is located.
+   4.3 State clearly how the test reproduces the issue.
+   4.4 State clearly the best practices to take into account in the fix.
+   4.5 State clearly how to fix the problem.
 
-Phase 5. FIX ANALYSIS: state clearly the problem and how to fix it
-   5.1 State clearly what the problem is.
-   5.2 State clearly where the problem is located.
-   5.3 State clearly how the test reproduces the issue.
-   5.4 State clearly the best practices to take into account in the fix.
-   5.5 State clearly how to fix the problem.
+Phase 5. FIX IMPLEMENTATION: Edit the source code to implement your chosen solution.
+   5.1 Make minimal, focused changes to fix the issue.
 
-Phase 6. FIX IMPLEMENTATION: Edit the source code to implement your chosen solution.
-   6.1 Make minimal, focused changes to fix the issue.
+Phase 6. VERIFICATION: Test your implementation thoroughly.
+   6.1 Run your reproduction script to verify the fix works.
+   6.2 Add edge cases to your test script to ensure comprehensive coverage.
+   6.3 Run existing tests related to the modified code to ensure you haven't broken anything.
 
-Phase 7. VERIFICATION: Test your implementation thoroughly.
-   7.1 Run your reproduction script to verify the fix works.
-   7.2 Add edge cases to your test script to ensure comprehensive coverage.
-   7.3 Run existing tests related to the modified code to ensure you haven't broken anything.
-
-Phase 8. FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit {instance["base_commit"]}.
-   8.1 Ensure you've fully addressed all requirements.
-   8.2 Run any tests in the repository related to:
-       8.2.1 The issue you are fixing
-       8.2.2 The files you modified
-       8.2.3 The functions you changed
-   8.3 If any tests fail, revise your implementation until all tests pass
+Phase 7. FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit {instance["base_commit"]}.
+   7.1 Ensure you've fully addressed all requirements.
+   7.2 Run any tests in the repository related to:
+       7.2.1 The issue you are fixing
+       7.2.2 The files you modified
+       7.2.3 The functions you changed
+   7.3 If any tests fail, revise your implementation until all tests pass
 
 Be thorough in your exploration, testing, and reasoning. It's fine if your thinking process is lengthy - quality and completeness are more important than brevity.
 """
@@ -766,7 +424,7 @@ def recover_patch(state: State, instance: pd.Series) -> str:
     if state is None:
         return ""
 
-    workspace_prefix = f"/workspace/{get_swebench_workspace_dir_name(instance)}/"
+    workspace_prefix = f"{get_workspace_path(instance)}/"
 
     edits: list[dict[str, str]] = []
     for event in state.history:
@@ -876,7 +534,7 @@ def _setup_instance_logging(output_dir: str):
         "modal": logging.DEBUG,
         "httpcore": logging.INFO,
         "urllib3": logging.INFO,
-        "swebench_eval": logging.DEBUG,
+        "swebench_pro_eval": logging.DEBUG,
     }
 
     saved_levels: dict[str, int] = {}
@@ -888,21 +546,17 @@ def _setup_instance_logging(output_dir: str):
         lgr.setLevel(level)
         lgr.addHandler(handler)
 
-    # Mute the openhands console handler so DEBUG/INFO from the agent
-    # internals don't leak to the terminal in this subprocess.
     for h in logging.getLogger("openhands").handlers:
         if h is not handler and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
             muted_console.append((h, h.level))
             h.setLevel(logging.CRITICAL + 1)
 
-    # Also attach to root to catch stray loggers from third-party libs.
     root = logging.getLogger()
     saved_levels["root"] = root.level
     root.addHandler(handler)
 
-    # Route stderr through logging so raw tracebacks are captured.
     original_stderr = sys.stderr
-    stderr_logger = logging.getLogger("swebench_eval.stderr")
+    stderr_logger = logging.getLogger("swebench_pro_eval.stderr")
     stderr_logger.setLevel(logging.DEBUG)
     stderr_logger.addHandler(handler)
     stderr_logger.propagate = False
@@ -1194,53 +848,92 @@ def create_predictions_file(patches: dict[str, str], output_path: str, model_nam
             f.write(json.dumps(entry) + "\n")
 
 
+def _prepare_pro_raw_samples(output_dir: str) -> str:
+    """Write the SWE-bench Pro dataset to a JSONL file for the Pro eval script."""
+    raw_path = os.path.join(output_dir, "swebench_pro_instances.jsonl")
+    if os.path.exists(raw_path):
+        return raw_path
+    dataset = load_dataset(SWEBENCH_PRO_DATASET, split="test")
+    with open(raw_path, "w") as f:
+        for item in dataset:
+            row = dict(item)
+            if isinstance(row.get("fail_to_pass"), list):
+                row["fail_to_pass"] = json.dumps(row["fail_to_pass"])
+            if isinstance(row.get("pass_to_pass"), list):
+                row["pass_to_pass"] = json.dumps(row["pass_to_pass"])
+            if isinstance(row.get("selected_test_files_to_run"), list):
+                row["selected_test_files_to_run"] = json.dumps(row["selected_test_files_to_run"])
+            f.write(json.dumps(row) + "\n")
+    return raw_path
+
+
+def _create_pro_patches_json(patches: dict[str, str], output_dir: str) -> str:
+    """Write patches in the JSON format expected by swe_bench_pro_eval.py."""
+    path = os.path.join(output_dir, "pro_patches.json")
+    entries = [
+        {"instance_id": iid, "patch": patch, "prefix": MODEL_NAME}
+        for iid, patch in patches.items()
+    ]
+    with open(path, "w") as f:
+        json.dump(entries, f, indent=2)
+    return path
+
+
 def run_swebench_evaluation(
     predictions_path: str,
     run_id: str,
     output_dir: str,
-    dataset: str = "princeton-nlp/SWE-bench_Verified",
-    split: str = "test",
     max_workers: int = 50,
     timeout: int = 3600,
 ):
+    patches = find_patches(output_dir)
+    if not patches:
+        logger.info("No patches to evaluate")
+        return
+
+    raw_sample_path = _prepare_pro_raw_samples(output_dir)
+    patches_json = _create_pro_patches_json(patches, output_dir)
+    eval_output_dir = os.path.join(output_dir, "pro_eval_output")
+    os.makedirs(eval_output_dir, exist_ok=True)
+
+    pro_eval_script = os.path.join(SWEBENCH_PRO_REPO_DIR, "swe_bench_pro_eval.py")
+    scripts_dir = os.path.join(SWEBENCH_PRO_REPO_DIR, "run_scripts")
+
     cmd = [
-        sys.executable, "-m", "swebench.harness.run_evaluation",
-        "--dataset_name", dataset,
-        "--split", split,
-        "--predictions_path", predictions_path,
-        "--run_id", run_id,
-        "--timeout", str(timeout),
-        "--cache_level", "instance",
-        "--max_workers", str(max_workers),
-        "--modal", "true",
+        sys.executable, pro_eval_script,
+        "--raw_sample_path", raw_sample_path,
+        "--patch_path", patches_json,
+        "--output_dir", eval_output_dir,
+        "--scripts_dir", scripts_dir,
+        "--dockerhub_username", "jefzda",
+        "--num_workers", str(max_workers),
     ]
-    
-    logger.info(f"\nRunning evaluation command:")
+
+    logger.info(f"\nRunning SWE-bench Pro evaluation:")
     logger.info(f"  {' '.join(cmd)}")
-    logger.info(f"  cwd: {output_dir}")
-    
-    proc = subprocess.run(cmd, cwd=output_dir)
+    logger.info(f"  cwd: {SWEBENCH_PRO_REPO_DIR}")
+
+    proc = subprocess.run(cmd, cwd=SWEBENCH_PRO_REPO_DIR)
     if proc.returncode != 0:
-        logger.info(f"Warning: swebench harness exited with code {proc.returncode}")
+        logger.info(f"Warning: SWE-bench Pro eval exited with code {proc.returncode}")
 
 
 def save_evaluation_results(run_id: str, model_name: str, instance_ids: list[str], input_dir: str) -> dict:
-    report_file = os.path.join(input_dir, f"{model_name}.{run_id}.json")
-    
+    eval_output_dir = os.path.join(input_dir, "pro_eval_output")
+    report_file = os.path.join(eval_output_dir, "eval_results.json")
+
     if not os.path.exists(report_file):
-        logger.info(f"\nNo report file found at {report_file}")
-        for f in Path(input_dir).glob("*.json"):
+        logger.info(f"\nNo eval_results.json found at {report_file}")
+        for f in Path(eval_output_dir).glob("*.json") if Path(eval_output_dir).exists() else []:
             logger.info(f"  Found: {f}")
         return {}
-    
+
     with open(report_file) as f:
-        report = json.load(f)
-    
-    resolved = report.get("resolved_ids", report.get("resolved", []))
-    total = len(instance_ids)
-    num_resolved = len(resolved)
-    unresolved = [i for i in instance_ids if i not in resolved]
-    
+        eval_results = json.load(f)
+
+    resolved = [iid for iid, passed in eval_results.items() if passed]
+    unresolved = [iid for iid in instance_ids if iid not in resolved]
+
     input_path = Path(input_dir)
     for instance_id in instance_ids:
         instance_dir = input_path / instance_id
@@ -1252,11 +945,11 @@ def save_evaluation_results(run_id: str, model_name: str, instance_ids: list[str
             result_file = instance_dir / "eval_result.json"
             with open(result_file, "w") as f:
                 json.dump(result, f, indent=2)
-    
+
     summary = {
         "run_id": run_id,
-        "total": total,
-        "resolved": num_resolved,
+        "total": len(instance_ids),
+        "resolved": len(resolved),
         "resolved_ids": resolved,
         "unresolved_ids": unresolved,
     }
@@ -1372,7 +1065,6 @@ def run_evaluation_phase(output_base_dir: str, run_id: str) -> dict:
         run_id=run_id,
         output_dir=output_base_dir,
         max_workers=len(patches),
-        timeout=3600,
     )
     
     eval_summary = save_evaluation_results(run_id, MODEL_NAME, instance_ids, output_base_dir)
@@ -1407,7 +1099,7 @@ def save_config(output_dir: str, num_instances: int):
     with open(os.path.join(output_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
 
-    shutil.copy2(__file__, os.path.join(output_dir, "run_swebench_eval.py"))
+    shutil.copy2(__file__, os.path.join(output_dir, "run_swebench_pro_eval.py"))
 
 
 def main(num_instances: int = 50):
@@ -1418,7 +1110,7 @@ def main(num_instances: int = 50):
     save_config(output_base_dir, num_instances)
 
     logger.info(f"\n{'='*60}")
-    logger.info("SWE-BENCH EVALUATION PIPELINE")
+    logger.info("SWE-BENCH PRO EVALUATION PIPELINE")
     logger.info(f"{'='*60}")
     logger.info(f"Timestamp: {timestamp}")
     logger.info(f"Output directory: {output_base_dir}")
@@ -1462,13 +1154,13 @@ def find_failed_instances(trajectory_dir: str) -> list[str]:
     """Find instance IDs that have no subdir or an empty patch.diff.
 
     Determines the expected instance set from generation_summary.json (if it
-    exists) unioned with any subdirectory whose name is a valid SWE-bench
+    exists) unioned with any subdirectory whose name is a valid SWE-bench Pro
     instance ID.
     """
     trajectory_path = Path(trajectory_dir)
 
-    dataset = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
-    all_ids = {item["instance_id"] for item in dataset}
+    by_id = _load_pro_dataset()
+    all_ids = set(by_id.keys())
 
     expected_ids: set[str] = set()
 
@@ -1560,8 +1252,7 @@ def retry_failed(trajectory_dir: str):
     for iid in failed_ids:
         logger.info(f"  - {iid}")
 
-    dataset = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
-    by_id = {item["instance_id"]: pd.Series(item) for item in dataset}
+    by_id = _load_pro_dataset()
     instances_to_retry = [by_id[iid] for iid in failed_ids if iid in by_id]
 
     llm_config = LLMConfig(
@@ -1660,14 +1351,13 @@ def retry_failed(trajectory_dir: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SWE-bench evaluation pipeline")
+    parser = argparse.ArgumentParser(description="SWE-bench Pro evaluation pipeline")
     subparsers = parser.add_subparsers(dest="command")
 
-    # run (default): full pipeline
     p_run = subparsers.add_parser("run", help="Full pipeline: generate patches + evaluate")
     p_run.add_argument("-n", "--num-instances", type=int, default=50,
-                       choices=range(1, 501), metavar="[1-500]",
-                       help="Number of SWE-bench instances (default: 50, max: 500)")
+                       choices=range(1, 732), metavar="[1-731]",
+                       help="Number of SWE-bench Pro instances (default: 50, max: 731)")
 
     # eval: evaluate existing patches
     p_eval = subparsers.add_parser("eval", help="Evaluate existing patches only")
@@ -1681,8 +1371,8 @@ if __name__ == "__main__":
 
     # Support legacy usage without subcommand: just -n
     parser.add_argument("-n", "--num-instances", type=int, default=50,
-                        choices=range(1, 501), metavar="[1-500]",
-                        help="Number of SWE-bench instances (default: 50, max: 500)")
+                        choices=range(1, 732), metavar="[1-731]",
+                        help="Number of SWE-bench Pro instances (default: 50, max: 731)")
 
     args = parser.parse_args()
     start_time = time.time()
